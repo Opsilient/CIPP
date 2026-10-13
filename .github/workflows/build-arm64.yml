@@ -1,0 +1,84 @@
+# Opsilient: native arm64 builds of the upstream CIPP image (GHCR only publishes amd64).
+# Builds straight from the CyberDrain/Craft + CyberDrain/CIPP tags; this fork's own tree is not used.
+# Craft (the runtime base) is built first and pushed to ghcr.io/opsilient/craft by this repo,
+# so this repo's GITHUB_TOKEN owns the package and the CIPP build can pull it.
+name: Build arm64 images
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "CIPP upstream tag, e.g. v11.1.0"
+        required: true
+      craft_tag:
+        description: "Craft upstream tag, e.g. 1.0.24"
+        required: true
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: CyberDrain/Craft
+          ref: ${{ inputs.craft_tag }}
+          path: craft
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: CyberDrain/CIPP
+          ref: ${{ inputs.tag }}
+          path: cipp
+          persist-credentials: false
+      - run: |
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "COMMIT_SHA=$(git -C cipp rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%FT%TZ)" >> "$GITHUB_ENV"
+        env: { TAG: "${{ inputs.tag }}" }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: craft
+        uses: docker/build-push-action@v6
+        with:
+          context: craft
+          file: craft/build/Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ghcr.io/opsilient/craft:${{ inputs.craft_tag }}
+          build-args: |
+            BUILD_CONFIGURATION=Release
+            APP_VERSION=${{ inputs.craft_tag }}
+          cache-from: type=gha,scope=craft-arm64
+          cache-to: type=gha,mode=max,scope=craft-arm64
+      - id: cipp
+        uses: docker/build-push-action@v6
+        with:
+          context: cipp
+          file: cipp/build/Dockerfile.release
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ghcr.io/opsilient/cipp:${{ env.VERSION }}
+          build-args: |
+            CRAFT_BASE=ghcr.io/opsilient/craft@${{ steps.craft.outputs.digest }}
+            APP_VERSION=${{ env.VERSION }}
+            COMMIT_SHA=${{ env.COMMIT_SHA }}
+            IMAGE_TAG=latest
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          cache-from: type=gha,scope=cipp-arm64
+          cache-to: type=gha,mode=max,scope=cipp-arm64
+      - run: |
+          {
+            echo "craft ghcr.io/opsilient/craft@${{ steps.craft.outputs.digest }}"
+            echo "cipp ghcr.io/opsilient/cipp@${{ steps.cipp.outputs.digest }}"
+            echo '```'
+            docker buildx imagetools inspect "ghcr.io/opsilient/cipp@${{ steps.cipp.outputs.digest }}"
+            docker buildx imagetools inspect --format '{{json .Image}}' "ghcr.io/opsilient/cipp@${{ steps.cipp.outputs.digest }}" | jq -c '[.. | objects | select(has("architecture")) | {os, architecture, variant}] | unique'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
